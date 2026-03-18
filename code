@@ -1,0 +1,452 @@
+import React, { useEffect, useMemo, useState } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
+import { Slider } from "@/components/ui/slider";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Cloud, CloudRain, Snowflake, Wind, Droplets, Sun, Moon } from "lucide-react";
+
+const STORAGE_KEY = "what-clothes-profile-v1";
+
+const avatarBase = "w-32 h-44 rounded-[2rem] border-2 bg-white shadow-sm flex flex-col items-center justify-start overflow-hidden";
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function getSavedProfile() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw
+      ? JSON.parse(raw)
+      : {
+          warmthBias: 0,
+          totalFeedback: 0,
+          history: [],
+        };
+  } catch {
+    return { warmthBias: 0, totalFeedback: 0, history: [] };
+  }
+}
+
+function saveProfile(profile) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(profile));
+}
+
+async function geocodeLocation(location) {
+  const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(location)}&count=1&language=en&format=json`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error("Could not find location.");
+  const data = await response.json();
+  if (!data.results?.length) throw new Error("Location not found.");
+  return data.results[0];
+}
+
+async function fetchWeather(latitude, longitude) {
+  const hourly = [
+    "temperature_2m",
+    "relative_humidity_2m",
+    "cloud_cover",
+    "precipitation_probability",
+    "rain",
+    "snowfall",
+    "wind_speed_10m",
+  ].join(",");
+
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&hourly=${hourly}&forecast_days=2&timezone=auto`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error("Could not fetch weather.");
+  return response.json();
+}
+
+function pickClosestHourBlock(hourly, targetHour) {
+  const { time, temperature_2m, relative_humidity_2m, cloud_cover, precipitation_probability, rain, snowfall, wind_speed_10m } = hourly;
+  let bestIndex = 0;
+  let bestDistance = Infinity;
+
+  time.forEach((t, i) => {
+    const hour = new Date(t).getHours();
+    const distance = Math.abs(hour - targetHour);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = i;
+    }
+  });
+
+  return {
+    time: time[bestIndex],
+    temperature: temperature_2m[bestIndex],
+    humidity: relative_humidity_2m[bestIndex],
+    cloudCover: cloud_cover[bestIndex],
+    precipProbability: precipitation_probability[bestIndex],
+    rain: rain[bestIndex],
+    snow: snowfall[bestIndex],
+    windSpeed: wind_speed_10m[bestIndex],
+  };
+}
+
+function computeFeelsLikeScore(weather, warmthBias) {
+  let score = weather.temperature + warmthBias;
+
+  if (weather.windSpeed >= 30) score -= 4;
+  else if (weather.windSpeed >= 20) score -= 2;
+  else if (weather.windSpeed >= 12) score -= 1;
+
+  if (weather.humidity >= 85 && weather.temperature >= 23) score += 2;
+  else if (weather.humidity >= 70 && weather.temperature >= 23) score += 1;
+
+  if (weather.rain >= 1 || weather.precipProbability >= 60) score -= 2;
+  else if (weather.precipProbability >= 35) score -= 1;
+
+  if (weather.snow > 0) score -= 4;
+  if (weather.cloudCover >= 85 && weather.temperature < 18) score -= 1;
+
+  return score;
+}
+
+function chooseOutfit({ feelsLike, gender, isNight }) {
+  const female = gender === "woman";
+
+  if (feelsLike <= 2) {
+    return {
+      key: "heavy",
+      top: "heavy jumper",
+      bottom: "trousers",
+      outer: "coat",
+      shoes: "boots",
+      label: "Very cold outfit",
+      palette: "winter",
+    };
+  }
+
+  if (feelsLike <= 10) {
+    return {
+      key: "cool",
+      top: "jumper",
+      bottom: "trousers",
+      outer: isNight ? "light jacket" : null,
+      shoes: "trainers",
+      label: "Cool weather outfit",
+      palette: "cool",
+    };
+  }
+
+  if (feelsLike <= 18) {
+    return {
+      key: "mild",
+      top: "t-shirt",
+      bottom: "trousers",
+      outer: "light jumper",
+      shoes: "trainers",
+      label: "Mild weather outfit",
+      palette: "mild",
+    };
+  }
+
+  if (feelsLike <= 25) {
+    return female
+      ? {
+          key: "warm-female",
+          top: "t-shirt",
+          bottom: "dress",
+          outer: null,
+          shoes: "light shoes",
+          label: "Warm weather outfit",
+          palette: "warm",
+        }
+      : {
+          key: "warm-male",
+          top: "t-shirt",
+          bottom: "trousers",
+          outer: null,
+          shoes: "light shoes",
+          label: "Warm weather outfit",
+          palette: "warm",
+        };
+  }
+
+  return female
+    ? {
+        key: "hot-female",
+        top: "light top",
+        bottom: "dress",
+        outer: null,
+        shoes: "sandals",
+        label: "Hot weather outfit",
+        palette: "hot",
+      }
+    : {
+        key: "hot-male",
+        top: "t-shirt",
+        bottom: "shorts",
+        outer: null,
+        shoes: "sandals",
+        label: "Hot weather outfit",
+        palette: "hot",
+      };
+}
+
+function buildExplanation(weather, outfit, feelsLike) {
+  const bits = [`It will feel like about ${Math.round(feelsLike)}°C.`];
+
+  if (weather.windSpeed >= 20) bits.push(`Wind speeds around ${Math.round(weather.windSpeed)} km/h will make it feel cooler.`);
+  if (weather.humidity >= 75 && weather.temperature >= 22) bits.push(`Humidity is high, so it may feel sticky and sweaty.`);
+  if (weather.precipProbability >= 50 || weather.rain >= 1) bits.push(`Rain is possible, so extra coverage helps.`);
+  if (weather.snow > 0) bits.push(`Snow is expected, so warm layers are important.`);
+  if (weather.cloudCover >= 75 && weather.temperature < 18) bits.push(`Heavy cloud cover can make the day feel dull and cooler.`);
+
+  bits.push(`Suggested outfit: ${[outfit.top, outfit.bottom, outfit.outer].filter(Boolean).join(", ")}.`);
+  return bits.join(" ");
+}
+
+function OutfitAvatar({ gender, outfit, title, mode }) {
+  const isWoman = gender === "woman";
+  const topStyle = {
+    heavy: "bg-slate-700",
+    cool: "bg-slate-500",
+    mild: "bg-emerald-500",
+    warm: "bg-amber-400",
+    hot: "bg-rose-400",
+    "warm-female": "bg-amber-400",
+    "hot-female": "bg-rose-400",
+    "warm-male": "bg-amber-400",
+    "hot-male": "bg-rose-400",
+  };
+
+  const paletteKey = outfit.palette;
+  const topColor =
+    paletteKey === "winter"
+      ? "bg-slate-700"
+      : paletteKey === "cool"
+      ? "bg-sky-500"
+      : paletteKey === "mild"
+      ? "bg-emerald-500"
+      : paletteKey === "warm"
+      ? "bg-amber-400"
+      : "bg-rose-400";
+
+  const bottomColor = outfit.bottom === "shorts" ? "bg-stone-300" : outfit.bottom === "dress" ? "bg-fuchsia-300" : "bg-zinc-500";
+  const outerColor = outfit.outer ? "bg-neutral-800/80" : "bg-transparent";
+
+  return (
+    <div className="flex flex-col items-center gap-3">
+      <div className="flex items-center gap-2 text-sm font-medium">
+        {mode === "day" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+        {title}
+      </div>
+      <div className={avatarBase}>
+        <div className="w-14 h-14 mt-4 rounded-full bg-orange-200 border" />
+        <div className={`relative mt-2 w-20 ${isWoman && outfit.bottom === "dress" ? "h-24" : "h-16"} rounded-t-2xl ${topColor}`}>
+          {outfit.outer && <div className={`absolute inset-0 rounded-t-2xl ${outerColor}`} />}
+        </div>
+        {outfit.bottom === "dress" ? (
+          <div className={`w-24 h-20 -mt-1 rounded-b-[2rem] ${bottomColor}`} />
+        ) : (
+          <div className="flex gap-2 mt-1">
+            <div className={`w-8 h-20 rounded-b-2xl ${bottomColor}`} />
+            <div className={`w-8 h-20 rounded-b-2xl ${bottomColor}`} />
+          </div>
+        )}
+      </div>
+      <div className="text-center">
+        <div className="font-medium">{outfit.label}</div>
+        <div className="text-sm text-muted-foreground">
+          {[outfit.top, outfit.bottom, outfit.outer, outfit.shoes].filter(Boolean).join(" • ")}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WeatherMiniStats({ weather }) {
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+      <div className="rounded-2xl border p-3"><div className="flex items-center gap-2 font-medium"><Wind className="w-4 h-4" /> Wind</div><div>{Math.round(weather.windSpeed)} km/h</div></div>
+      <div className="rounded-2xl border p-3"><div className="flex items-center gap-2 font-medium"><Droplets className="w-4 h-4" /> Humidity</div><div>{Math.round(weather.humidity)}%</div></div>
+      <div className="rounded-2xl border p-3"><div className="flex items-center gap-2 font-medium"><Cloud className="w-4 h-4" /> Cloud</div><div>{Math.round(weather.cloudCover)}%</div></div>
+      <div className="rounded-2xl border p-3"><div className="flex items-center gap-2 font-medium">{weather.snow > 0 ? <Snowflake className="w-4 h-4" /> : <CloudRain className="w-4 h-4" />} Precip</div><div>{Math.round(weather.precipProbability)}%</div></div>
+    </div>
+  );
+}
+
+export default function WhatClothesApp() {
+  const [location, setLocation] = useState("Madrid");
+  const [gender, setGender] = useState("man");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+  const [profile, setProfile] = useState({ warmthBias: 0, totalFeedback: 0, history: [] });
+  const [dayFeedback, setDayFeedback] = useState([3]);
+  const [nightFeedback, setNightFeedback] = useState([3]);
+
+  useEffect(() => {
+    setProfile(getSavedProfile());
+  }, []);
+
+  const feedbackSummary = useMemo(() => {
+    if (!profile.totalFeedback) return "No learning yet — using the default model.";
+    const direction = profile.warmthBias > 0.5 ? "You usually feel colder than average." : profile.warmthBias < -0.5 ? "You usually feel warmer than average." : "Your preferences are close to average.";
+    return `${direction} Feedback samples: ${profile.totalFeedback}. Current warmth bias: ${profile.warmthBias.toFixed(1)}°C.`;
+  }, [profile]);
+
+  async function handleSuggest() {
+    try {
+      setLoading(true);
+      setError("");
+      const geo = await geocodeLocation(location);
+      const forecast = await fetchWeather(geo.latitude, geo.longitude);
+      const dayWeather = pickClosestHourBlock(forecast.hourly, 14);
+      const nightWeather = pickClosestHourBlock(forecast.hourly, 21);
+
+      const dayFeelsLike = computeFeelsLikeScore(dayWeather, profile.warmthBias);
+      const nightFeelsLike = computeFeelsLikeScore(nightWeather, profile.warmthBias);
+
+      const dayOutfit = chooseOutfit({ feelsLike: dayFeelsLike, gender, isNight: false });
+      const nightOutfit = chooseOutfit({ feelsLike: nightFeelsLike, gender, isNight: true });
+
+      setResult({
+        placeName: `${geo.name}${geo.country ? `, ${geo.country}` : ""}`,
+        latitude: geo.latitude,
+        longitude: geo.longitude,
+        day: {
+          weather: dayWeather,
+          feelsLike: dayFeelsLike,
+          outfit: dayOutfit,
+          explanation: buildExplanation(dayWeather, dayOutfit, dayFeelsLike),
+        },
+        night: {
+          weather: nightWeather,
+          feelsLike: nightFeelsLike,
+          outfit: nightOutfit,
+          explanation: buildExplanation(nightWeather, nightOutfit, nightFeelsLike),
+        },
+      });
+    } catch (e) {
+      setError(e.message || "Something went wrong.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function applyFeedback(score, weather, slot) {
+    const delta = score === 1 ? 1.5 : score === 2 ? 0.75 : score === 3 ? 0 : score === 4 ? -0.75 : -1.5;
+
+    const updated = {
+      ...profile,
+      totalFeedback: profile.totalFeedback + 1,
+      warmthBias: clamp(profile.warmthBias + delta, -8, 8),
+      history: [
+        {
+          slot,
+          score,
+          temperature: weather.temperature,
+          humidity: weather.humidity,
+          windSpeed: weather.windSpeed,
+          savedAt: new Date().toISOString(),
+        },
+        ...profile.history,
+      ].slice(0, 30),
+    };
+
+    setProfile(updated);
+    saveProfile(updated);
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-white p-6 md:p-10">
+      <div className="max-w-6xl mx-auto space-y-6">
+        <div className="space-y-2">
+          <Badge className="rounded-full px-4 py-1 text-sm">What Clothes</Badge>
+          <h1 className="text-4xl font-bold tracking-tight">Weather-based outfit suggestions that learn what feels right for you</h1>
+          <p className="text-muted-foreground max-w-3xl">
+            Enter a location and gender, get separate day and night outfit suggestions, then rate how the outfit felt from 1 to 5 so the app improves over time.
+          </p>
+        </div>
+
+        <Card className="rounded-3xl shadow-sm">
+          <CardHeader>
+            <CardTitle>Get today&apos;s outfit recommendation</CardTitle>
+          </CardHeader>
+          <CardContent className="grid md:grid-cols-3 gap-6">
+            <div className="space-y-2 md:col-span-2">
+              <Label htmlFor="location">Location</Label>
+              <Input id="location" value={location} onChange={(e) => setLocation(e.target.value)} placeholder="London, Madrid, New York..." className="rounded-2xl" />
+            </div>
+            <div className="space-y-2">
+              <Label>Gender</Label>
+              <RadioGroup value={gender} onValueChange={setGender} className="flex gap-6 pt-2">
+                <div className="flex items-center space-x-2"><RadioGroupItem value="man" id="man" /><Label htmlFor="man">Man</Label></div>
+                <div className="flex items-center space-x-2"><RadioGroupItem value="woman" id="woman" /><Label htmlFor="woman">Woman</Label></div>
+              </RadioGroup>
+            </div>
+            <div className="md:col-span-3 flex flex-wrap items-center gap-3">
+              <Button onClick={handleSuggest} disabled={loading} className="rounded-2xl px-6">{loading ? "Checking weather..." : "Suggest clothes"}</Button>
+              <div className="text-sm text-muted-foreground">{feedbackSummary}</div>
+            </div>
+            {error && <div className="md:col-span-3 text-sm text-red-600">{error}</div>}
+          </CardContent>
+        </Card>
+
+        {result && (
+          <>
+            <Card className="rounded-3xl shadow-sm">
+              <CardHeader>
+                <CardTitle>{result.placeName}</CardTitle>
+              </CardHeader>
+              <CardContent className="grid lg:grid-cols-2 gap-10">
+                <div className="space-y-5">
+                  <OutfitAvatar gender={gender} outfit={result.day.outfit} title={`Day outfit • ${Math.round(result.day.weather.temperature)}°C`} mode="day" />
+                  <WeatherMiniStats weather={result.day.weather} />
+                  <p className="text-sm leading-6 text-muted-foreground">{result.day.explanation}</p>
+                  <div className="space-y-3 rounded-2xl border p-4">
+                    <div className="font-medium">How did the day outfit feel?</div>
+                    <div className="text-sm text-muted-foreground">1 = way too cold, 3 = perfect, 5 = way too hot</div>
+                    <Slider value={dayFeedback} onValueChange={setDayFeedback} min={1} max={5} step={1} className="py-2" />
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm">Selected: {dayFeedback[0]}</div>
+                      <Button variant="outline" className="rounded-2xl" onClick={() => applyFeedback(dayFeedback[0], result.day.weather, "day")}>Save day feedback</Button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-5">
+                  <OutfitAvatar gender={gender} outfit={result.night.outfit} title={`Night outfit • ${Math.round(result.night.weather.temperature)}°C`} mode="night" />
+                  <WeatherMiniStats weather={result.night.weather} />
+                  <p className="text-sm leading-6 text-muted-foreground">{result.night.explanation}</p>
+                  <div className="space-y-3 rounded-2xl border p-4">
+                    <div className="font-medium">How did the night outfit feel?</div>
+                    <div className="text-sm text-muted-foreground">1 = way too cold, 3 = perfect, 5 = way too hot</div>
+                    <Slider value={nightFeedback} onValueChange={setNightFeedback} min={1} max={5} step={1} className="py-2" />
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm">Selected: {nightFeedback[0]}</div>
+                      <Button variant="outline" className="rounded-2xl" onClick={() => applyFeedback(nightFeedback[0], result.night.weather, "night")}>Save night feedback</Button>
+                    </div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="rounded-3xl shadow-sm">
+              <CardHeader>
+                <CardTitle>How the learning works</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4 text-sm leading-6 text-muted-foreground">
+                <p>
+                  This MVP stores a personal <strong>warmth bias</strong> in local storage. If you say the outfit was too cold, the bias moves up so future suggestions become warmer. If you say the outfit was too hot, the bias moves down so future suggestions become lighter.
+                </p>
+                <p>
+                  Weather inputs used: temperature, humidity, wind speed, cloud cover, rain probability, rain amount, and snowfall. The app converts those into a simple “feels like for clothing” score, then maps that score to outfit rules.
+                </p>
+                <p>
+                  For a production version, the next step would be to replace the single warmth bias with a richer model that learns separate preferences for wind, humidity, rain, season, time of day, and even specific users.
+                </p>
+              </CardContent>
+            </Card>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
